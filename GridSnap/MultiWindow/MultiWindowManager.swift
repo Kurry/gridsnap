@@ -254,9 +254,13 @@ class MultiWindowManager {
     }
 
     /// Finds the column count that best fills the screen with the given number of windows.
-    /// Minimizes blank cells; breaks ties by preferring tiles with aspect ratio close to square.
-    static func bestLayout(count: Int, screenWidth: CGFloat, screenHeight: CGFloat) -> (columns: Int, rows: Int) {
+    /// Minimizes blank cells; breaks ties by preferring tiles whose aspect ratio matches
+    /// `targetAspect` (width / height). Default 1 keeps tiles square; pass the windows'
+    /// natural aspect ratio (e.g. ~1.6 for terminals) to avoid distorting their shape.
+    static func bestLayout(count: Int, screenWidth: CGFloat, screenHeight: CGFloat, targetAspect: CGFloat = 1) -> (columns: Int, rows: Int) {
         guard count > 1 else { return (1, 1) }
+        // Guard against a degenerate target (zero/negative/non-finite) collapsing the score.
+        let target = (targetAspect.isFinite && targetAspect > 0) ? targetAspect : 1
         let sqrtN = sqrt(CGFloat(count))
         // Bound search to avoid single-row or single-column extremes
         let minCols = max(1, Int(ceil(sqrtN / 2)))
@@ -267,14 +271,29 @@ class MultiWindowManager {
             let rows = Int(ceil(CGFloat(count) / CGFloat(cols)))
             let blanks = CGFloat(cols * rows - count)
             let tileAspect = (screenWidth / CGFloat(cols)) / (screenHeight / CGFloat(rows))
-            // Penalize blank cells heavily; then prefer tiles close to square (aspect ratio = 1)
-            let score = blanks * 1.5 + abs(log(tileAspect))
+            // Penalize blank cells heavily; then prefer tiles whose aspect ratio is closest
+            // to the windows' natural ratio. log() makes the penalty symmetric: a tile twice
+            // as wide as the target is penalized the same as one twice as tall.
+            let score = blanks * 1.5 + abs(log(tileAspect / target))
             if score < bestScore {
                 bestScore = score
                 bestCols = cols
             }
         }
         return (bestCols, Int(ceil(CGFloat(count) / CGFloat(bestCols))))
+    }
+
+    /// Median width/height aspect ratio of a set of window frames, clamped to a sane range
+    /// so one freakishly tall or wide window can't force a single-row/single-column grid.
+    /// Returns 1 (square) when there is nothing usable to measure.
+    static func medianAspect(of frames: [CGRect]) -> CGFloat {
+        let aspects = frames
+            .filter { !$0.isNull && $0.width > 0 && $0.height > 0 }
+            .map { $0.width / $0.height }
+            .sorted()
+        guard !aspects.isEmpty else { return 1 }
+        let median = aspects[aspects.count / 2]
+        return min(max(median, 0.33), 3.0)
     }
 
     /// Pure spatial ordering for unit testing.
@@ -323,9 +342,9 @@ class MultiWindowManager {
 
     /// Pure layout math: returns one CGRect per window in normal macOS coordinates (origin bottom-left).
     /// Callers must convert each rect with .screenFlipped before passing to setFrame.
-    static func tileRects(count: Int, in visibleFrame: CGRect, gap: CGFloat) -> [CGRect] {
+    static func tileRects(count: Int, in visibleFrame: CGRect, gap: CGFloat, targetAspect: CGFloat = 1) -> [CGRect] {
         guard count > 0 else { return [] }
-        let (columns, rows) = bestLayout(count: count, screenWidth: visibleFrame.width, screenHeight: visibleFrame.height)
+        let (columns, rows) = bestLayout(count: count, screenWidth: visibleFrame.width, screenHeight: visibleFrame.height, targetAspect: targetAspect)
         // Gap is only between tiles, not at the outer edges.
         let tileW = floor((visibleFrame.width  - gap * CGFloat(columns - 1)) / CGFloat(columns))
         let tileH = floor((visibleFrame.height - gap * CGFloat(rows - 1))    / CGFloat(rows))
@@ -342,7 +361,10 @@ class MultiWindowManager {
 
     private static func applyTileRects(to windows: [AccessibilityElement], visibleFrame: CGRect) {
         let ordered = sortedSpatially(windows)
-        let rects = tileRects(count: ordered.count, in: visibleFrame, gap: tileGap)
+        // Choose the grid that best preserves the windows' natural shape (e.g. ~1.6:1
+        // terminals stay landscape) instead of forcing every tile toward a square.
+        let targetAspect = medianAspect(of: ordered.map { $0.frame })
+        let rects = tileRects(count: ordered.count, in: visibleFrame, gap: tileGap, targetAspect: targetAspect)
         var seenPIDs = Set<pid_t>()
         for (w, rect) in zip(ordered, rects) {
             w.setFrame(rect.screenFlipped)

@@ -1,5 +1,5 @@
 import XCTest
-@testable import Rectangle
+@testable import GridSnap
 
 class GridSnapTests: XCTestCase {
 
@@ -65,6 +65,59 @@ class GridSnapTests: XCTestCase {
             let (c, r) = MultiWindowManager.bestLayout(count: count, screenWidth: landscape.w, screenHeight: landscape.h)
             XCTAssertGreaterThanOrEqual(c * r, count, "grid must hold all \(count) windows")
         }
+    }
+
+    // MARK: - bestLayout: target-aspect awareness
+
+    func testBestLayoutDefaultStillSquare() {
+        // Omitting targetAspect must reproduce the old square-tile behavior exactly.
+        let (c, r) = MultiWindowManager.bestLayout(count: 4, screenWidth: landscape.w, screenHeight: landscape.h)
+        XCTAssertEqual(c, 2); XCTAssertEqual(r, 2)
+    }
+
+    func testBestLayoutTerminalAspectPrefersMoreColumns() {
+        // 6 wide-ish terminal windows (~1.6:1). Square scoring gives 3×2; matching the
+        // terminals' landscape ratio should favor stacking more rows so each tile stays wide.
+        let square   = MultiWindowManager.bestLayout(count: 6, screenWidth: landscape.w, screenHeight: landscape.h, targetAspect: 1)
+        let terminal = MultiWindowManager.bestLayout(count: 6, screenWidth: landscape.w, screenHeight: landscape.h, targetAspect: 1.6)
+        XCTAssertEqual(square.columns, 3)
+        // A wide target should never pick a layout that makes tiles narrower than the square choice.
+        XCTAssertLessThanOrEqual(terminal.columns, square.columns)
+    }
+
+    func testBestLayoutTallWindowsPreferMoreColumns() {
+        // Portrait windows (aspect 0.6) should push toward more columns so tiles stay tall/narrow.
+        let square = MultiWindowManager.bestLayout(count: 6, screenWidth: landscape.w, screenHeight: landscape.h, targetAspect: 1)
+        let tall   = MultiWindowManager.bestLayout(count: 6, screenWidth: landscape.w, screenHeight: landscape.h, targetAspect: 0.6)
+        XCTAssertGreaterThanOrEqual(tall.columns, square.columns)
+    }
+
+    func testMedianAspectBasic() {
+        let frames = [
+            CGRect(x: 0, y: 0, width: 800, height: 500),  // 1.6
+            CGRect(x: 0, y: 0, width: 800, height: 500),  // 1.6
+            CGRect(x: 0, y: 0, width: 900, height: 600),  // 1.5
+        ]
+        XCTAssertEqual(MultiWindowManager.medianAspect(of: frames), 1.6, accuracy: 0.001)
+    }
+
+    func testMedianAspectIgnoresDegenerateFrames() {
+        let frames = [
+            CGRect.null,
+            CGRect(x: 0, y: 0, width: 0, height: 500),
+            CGRect(x: 0, y: 0, width: 1000, height: 500), // 2.0
+        ]
+        XCTAssertEqual(MultiWindowManager.medianAspect(of: frames), 2.0, accuracy: 0.001)
+    }
+
+    func testMedianAspectEmptyDefaultsToSquare() {
+        XCTAssertEqual(MultiWindowManager.medianAspect(of: []), 1.0, accuracy: 0.001)
+    }
+
+    func testMedianAspectClampsOutliers() {
+        // A 50:1 window must not collapse the target — clamp keeps it usable.
+        let frames = [CGRect(x: 0, y: 0, width: 5000, height: 100)] // aspect 50
+        XCTAssertEqual(MultiWindowManager.medianAspect(of: frames), 3.0, accuracy: 0.001)
     }
 
     // MARK: - Tile layout math
